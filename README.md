@@ -86,10 +86,11 @@ bucle de eventos Selector necesario para Psycopg.
 
 ## Estado y límites actuales
 
-El límite anunciado para `transcribe` es 5 minutos, pero
-`audio.estimate_duration()` todavía devuelve 10 segundos fijos. Falta medir la
-duración real. La autenticación de clientes MCP y la comprobación de propiedad
-de cada trabajo siguen pendientes: **no expongas este stack a Internet**. El
+`transcribe` decodifica el audio con FFmpeg para medir su duración real y
+rechaza archivos inválidos y clips de más de 5 minutos. La validación tiene
+un tiempo máximo de 60 segundos. La autenticación de clientes MCP y la
+comprobación de propiedad de cada trabajo siguen pendientes: **no expongas
+este stack a Internet**. El
 Compose de ejemplo solo publica el MCP en `127.0.0.1` y usa credenciales de
 desarrollo. Antes de producción también hay que restringir los destinos de
 `audio_url`, limitar la lectura del audio durante la descarga y medir la

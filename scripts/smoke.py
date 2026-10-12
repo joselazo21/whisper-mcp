@@ -10,6 +10,7 @@ flujo real de cola (submit -> worker -> get) y el recurso.
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import wave
 from pathlib import Path
@@ -46,7 +47,8 @@ async def main() -> None:
         tools = [getattr(t, "name", t) for t in getattr(listing, "tools", listing)]
         print("TOOLS:", tools)
 
-        r = await client.call_tool("transcribe", {"audio_base64": "aGVsbG8=", "language": "es"})
+        sample = base64.b64encode((audio_dir / "smoke.wav").read_bytes()).decode("ascii")
+        r = await client.call_tool("transcribe", {"audio_base64": sample, "language": "es"})
         print("\n[transcribe]            isError =", _is_error(r))
         print("                       ", _texts(r)[0])
 

@@ -4,7 +4,7 @@ Actualizada: 12 de octubre de 2026. Idioma: español.
 
 Objetivo: exponer el servicio de transcripción de voz (Whisper) como un **servidor MCP** reutilizable, para que cualquier componente del entorno (asistentes, agentes, otros servicios) lo invoque sin depender de él. Este documento define el **contrato MCP**: transporte, tools, autenticación, manejo de audio y flujos. El motor de transcripción (core) está cubierto en `Whisper-guia-hosting-servidor.md`.
 
-**Estado:** contrato implementado y flujo de trabajos con PostgreSQL, RabbitMQ y worker. El despliegue real con Speaches, la autenticación multiempresa y la medición de duración siguen pendientes.
+**Estado:** contrato implementado, validación de duración real y flujo de trabajos con PostgreSQL, RabbitMQ y worker. El despliegue real con Speaches y la autenticación multiempresa siguen pendientes.
 
 ---
 
@@ -354,7 +354,7 @@ Todos: stdio (no Streamable HTTP), sin multi-tenant, sin colas ni audios largos.
 
 - [ ] Transporte Streamable HTTP confirmado (no stdio).
 - [ ] Las 4 tools + recurso `whisper://info` congelados como contrato.
-- [ ] Manejo de audio: url/path/base64 + validación de duración real.
+- [x] Manejo de audio: url/path/base64 + validación de duración real.
 - [ ] Auth: emisión/revocación de claves por cliente + verificación de pertenencia de `job_id`.
 - [ ] Errores: mapeo core→MCP y códigos JSON-RPC definidos.
 - [ ] `whisper-mcp` como Deployment stateless; core en red privada.

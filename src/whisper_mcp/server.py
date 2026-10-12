@@ -34,12 +34,11 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from . import core_client, jobs
-from .audio import AudioValidationError, estimate_duration, resolve_audio_bytes
+from .audio import AudioValidationError, MAX_SYNC_SECONDS, estimate_duration, resolve_audio_bytes
 from .core_client import CoreError
 from .models import CancelResult, JobResult, SubmitResult, TranscribeResult
 
-MAX_SYNC_SECONDS = 5 * 60
-
+_duration_probe_slots = asyncio.Semaphore(2)
 
 @asynccontextmanager
 async def _lifespan(server: MCPServer):
@@ -62,7 +61,7 @@ mcp = MCPServer(
     ),
     version="0.1.0",
     # Dependencias de runtime que `mcp dev`/`mcp install` instalan por sí solas.
-    dependencies=["httpx", "psycopg[binary]", "aio-pika"],
+    dependencies=["httpx", "psycopg[binary]", "aio-pika", "imageio-ffmpeg"],
     log_level=os.getenv("MCP_LOG_LEVEL", "INFO").upper(),
     debug=os.getenv("MCP_DEBUG", "false").lower() in ("1", "true", "yes", "on"),
     lifespan=_lifespan,
@@ -139,11 +138,11 @@ async def transcribe(
 ) -> TranscribeResult:
     raw, filename = await resolve_audio_bytes(audio_url, audio_base64, audio_path)
 
-    # Validación de duración (stub en el mock: ver audio.estimate_duration).
-    duration = estimate_duration(raw)
+    async with _duration_probe_slots:
+        duration = await asyncio.to_thread(estimate_duration, raw)
     if duration > MAX_SYNC_SECONDS:
         raise AudioValidationError(
-            f"El audio dura ~{duration:.0f}s y supera el límite de 5 minutos; "
+            "El audio supera el límite de 5 minutos; "
             "usa submit_transcription para audio largo."
         )
 

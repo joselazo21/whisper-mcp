@@ -1,21 +1,26 @@
 """Validación y resolución del audio de entrada.
 
 Resuelve `audio_url` / `audio_base64` / `audio_path` a bytes para enviarlos como
-multipart al core. La estimación de duración real está en *stub* a propósito:
-el mock no decodifica audio (no usa ffmpeg/CPU). Para producción, sustituir
-`estimate_duration` por ffprobe o similar.
+multipart al core y mide la duración decodificando el audio con FFmpeg.
 """
 
 from __future__ import annotations
 
 import base64
 import os
+import subprocess
+import tempfile
+from math import isfinite
+
+import imageio_ffmpeg
 
 import httpx
 
 MAX_BASE64_BYTES = 5 * 1024 * 1024  # 5 MB
 MAX_URL_BYTES = 25 * 1024 * 1024  # 25 MB al descargar
 MAX_JOB_AUDIO_BYTES = 200 * 1024 * 1024  # trabajos largos, un worker a la vez
+MAX_SYNC_SECONDS = 5 * 60
+PROBE_TIMEOUT_SECONDS = 60
 
 
 class AudioValidationError(Exception):
@@ -88,10 +93,60 @@ async def resolve_audio_bytes(
     return raw, "audio.bin"
 
 
-def estimate_duration(_audio: bytes) -> float:
-    """STUB: devuelve una duración fija. No decodifica audio.
+def estimate_duration(audio: bytes) -> float:
+    """Decodifica la primera pista de audio y mide sus segundos reales.
 
-    En producción, usar ffprobe u otra librería para obtener la duración real y
-    rechazar clips > 5 minutos en la tool `transcribe` (no fiarse del tamaño).
+    FFmpeg corre en un proceso aislado, sin acceso a protocolos de red y con
+    límites de tiempo de proceso y de audio decodificado. Para clips largos
+    basta con saber que superan el límite síncrono.
     """
-    return 10.0
+    if not audio:
+        raise AudioValidationError("El audio está vacío.")
+
+    path = ""
+    try:
+        with tempfile.NamedTemporaryFile(prefix="whisper-duration-", suffix=".audio", delete=False) as source:
+            path = source.name
+            source.write(audio)
+
+        command = [
+            imageio_ffmpeg.get_ffmpeg_exe(),
+            "-nostdin", "-hide_banner", "-loglevel", "error",
+            "-protocol_whitelist", "file,pipe",
+            "-i", path,
+            "-map", "0:a:0", "-vn", "-sn", "-dn",
+            "-t", str(MAX_SYNC_SECONDS + 1),
+            "-f", "null", "-", "-progress", "pipe:1",
+        ]
+        result = subprocess.run(
+            command,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=PROBE_TIMEOUT_SECONDS,
+            check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+        if result.returncode != 0:
+            raise AudioValidationError("El archivo no contiene una pista de audio válida.")
+
+        durations = [
+            line.partition("=")[2]
+            for line in result.stdout.decode("utf-8", errors="replace").splitlines()
+            if line.startswith("out_time_us=")
+        ]
+        if not durations:
+            raise AudioValidationError("No se pudo medir la duración del audio.")
+        duration = int(durations[-1]) / 1_000_000
+        if not isfinite(duration) or duration <= 0:
+            raise AudioValidationError("El audio no tiene una duración válida.")
+        return duration
+    except subprocess.TimeoutExpired as exc:
+        raise AudioValidationError("Se agotó el tiempo para validar el audio.") from exc
+    except (OSError, ValueError) as exc:
+        raise AudioValidationError("No se pudo validar la duración del audio.") from exc
+    finally:
+        if path:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass

@@ -25,7 +25,7 @@ async def client():
 
 
 @pytest.mark.anyio
-async def test_transcribe_ok(client, monkeypatch):
+async def test_transcribe_ok(client, monkeypatch, short_wav_base64):
     async def fake_transcribe_bytes(audio, filename, **kwargs):
         return {
             "text": "hola mundo",
@@ -35,19 +35,19 @@ async def test_transcribe_ok(client, monkeypatch):
 
     monkeypatch.setattr(core_client, "transcribe_bytes", fake_transcribe_bytes)
 
-    res = await client.call_tool("transcribe", {"audio_base64": "aGVsbG8=", "language": "es"})
+    res = await client.call_tool("transcribe", {"audio_base64": short_wav_base64, "language": "es"})
     assert res.is_error is False
     assert res.structured_content["text"] == "hola mundo"
     assert res.structured_content["segments"][0]["text"] == "hola mundo"
 
 
 @pytest.mark.anyio
-async def test_transcribe_plain_text_response(client, monkeypatch):
+async def test_transcribe_plain_text_response(client, monkeypatch, short_wav_base64):
     async def fake_transcribe_bytes(audio, filename, **kwargs):
         return {"text": "hola mundo"}
 
     monkeypatch.setattr(core_client, "transcribe_bytes", fake_transcribe_bytes)
-    res = await client.call_tool("transcribe", {"audio_base64": "aGVsbG8=", "response_format": "text"})
+    res = await client.call_tool("transcribe", {"audio_base64": short_wav_base64, "response_format": "text"})
     assert res.is_error is False
     assert res.structured_content["text"] == "hola mundo"
     assert res.structured_content["language"] is None
@@ -58,6 +58,17 @@ async def test_transcribe_no_source_is_error(client):
     res = await client.call_tool("transcribe", {})
     assert res.is_error is True
     assert "exactamente UNA" in res.content[0].text
+
+
+@pytest.mark.anyio
+async def test_transcribe_invalid_audio_is_error(client, monkeypatch):
+    async def unexpected_transcription(*args, **kwargs):
+        pytest.fail("El audio inválido no debe enviarse al core")
+
+    monkeypatch.setattr(core_client, "transcribe_bytes", unexpected_transcription)
+    res = await client.call_tool("transcribe", {"audio_base64": "aGVsbG8="})
+    assert res.is_error is True
+    assert "pista de audio válida" in res.content[0].text
 
 
 @pytest.mark.anyio

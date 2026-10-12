@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import base64
+import subprocess
 
 import httpx
+import imageio_ffmpeg
 import pytest
 
 from whisper_mcp.audio import AudioValidationError, estimate_duration, resolve_audio_bytes
+from conftest import wav_bytes
 
 
 @pytest.fixture
@@ -117,5 +120,21 @@ async def test_url_stops_at_size_limit(monkeypatch):
         await resolve_audio_bytes("https://example.com/a.wav", None, None, max_bytes=10)
 
 
-def test_estimate_duration_is_stub():
-    assert estimate_duration(b"cualquier-cosa") == 10.0
+@pytest.mark.parametrize("seconds", [1, 299, 300, 301])
+def test_estimate_duration_decodes_audio(seconds):
+    assert estimate_duration(wav_bytes(seconds)) == pytest.approx(seconds, abs=0.01)
+
+
+@pytest.mark.parametrize("raw", [b"", b"cualquier-cosa"])
+def test_estimate_duration_rejects_invalid_audio(raw):
+    with pytest.raises(AudioValidationError):
+        estimate_duration(raw)
+
+
+def test_estimate_duration_decodes_compressed_audio():
+    encoded = subprocess.run(
+        [imageio_ffmpeg.get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error",
+         "-f", "wav", "-i", "pipe:0", "-f", "mp3", "pipe:1"],
+        input=wav_bytes(2, sample_rate=16000), capture_output=True, check=True,
+    ).stdout
+    assert estimate_duration(encoded) == pytest.approx(2, abs=0.1)

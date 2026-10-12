@@ -9,7 +9,7 @@ from __future__ import annotations
 import pytest
 from mcp import Client
 
-from whisper_mcp import core_client
+from whisper_mcp import core_client, jobs
 from whisper_mcp.server import mcp
 
 
@@ -42,6 +42,18 @@ async def test_transcribe_ok(client, monkeypatch):
 
 
 @pytest.mark.anyio
+async def test_transcribe_plain_text_response(client, monkeypatch):
+    async def fake_transcribe_bytes(audio, filename, **kwargs):
+        return {"text": "hola mundo"}
+
+    monkeypatch.setattr(core_client, "transcribe_bytes", fake_transcribe_bytes)
+    res = await client.call_tool("transcribe", {"audio_base64": "aGVsbG8=", "response_format": "text"})
+    assert res.is_error is False
+    assert res.structured_content["text"] == "hola mundo"
+    assert res.structured_content["language"] is None
+
+
+@pytest.mark.anyio
 async def test_transcribe_no_source_is_error(client):
     res = await client.call_tool("transcribe", {})
     assert res.is_error is True
@@ -49,13 +61,25 @@ async def test_transcribe_no_source_is_error(client):
 
 
 @pytest.mark.anyio
+async def test_transcribe_over_five_minutes_is_error(client, monkeypatch):
+    monkeypatch.setattr("whisper_mcp.server.estimate_duration", lambda _audio: 301.0)
+
+    async def unexpected_transcription(*args, **kwargs):
+        pytest.fail("El audio largo no debe enviarse al core síncrono")
+
+    monkeypatch.setattr(core_client, "transcribe_bytes", unexpected_transcription)
+
+    res = await client.call_tool("transcribe", {"audio_base64": "aGVsbG8="})
+    assert res.is_error is True
+    assert "límite de 5 minutos" in res.content[0].text
+
+
+@pytest.mark.anyio
 async def test_get_unknown_job_is_error(client, monkeypatch):
-    from whisper_mcp.core_client import CoreError
-
     async def fake_get_job(job_id):
-        raise CoreError("job_id no encontrado en el core (404).", 404)
+        raise jobs.JobNotFound("job_id no encontrado.")
 
-    monkeypatch.setattr(core_client, "get_job", fake_get_job)
+    monkeypatch.setattr(jobs, "get_job", fake_get_job)
 
     res = await client.call_tool("get_transcription", {"job_id": "job_noexiste"})
     assert res.is_error is True
@@ -64,7 +88,7 @@ async def test_get_unknown_job_is_error(client, monkeypatch):
 
 @pytest.mark.anyio
 async def test_submit_get_cancel_flow(client, monkeypatch):
-    async def fake_submit(payload):
+    async def fake_submit(**payload):
         return {"job_id": "job_test", "status": "queued", "accepted": True}
 
     async def fake_get(job_id):
@@ -78,9 +102,9 @@ async def test_submit_get_cancel_flow(client, monkeypatch):
     async def fake_cancel(job_id):
         return {"cancelled": True}
 
-    monkeypatch.setattr(core_client, "submit_job", fake_submit)
-    monkeypatch.setattr(core_client, "get_job", fake_get)
-    monkeypatch.setattr(core_client, "cancel_job", fake_cancel)
+    monkeypatch.setattr(jobs, "submit_job", fake_submit)
+    monkeypatch.setattr(jobs, "get_job", fake_get)
+    monkeypatch.setattr(jobs, "cancel_job", fake_cancel)
 
     sub = await client.call_tool("submit_transcription", {"audio_url": "http://example.com/a.wav"})
     assert sub.structured_content["job_id"] == "job_test"
@@ -99,3 +123,13 @@ async def test_submit_without_source_is_error(client):
     res = await client.call_tool("submit_transcription", {})
     assert res.is_error is True
     assert "exactamente UNA" in res.content[0].text
+
+
+@pytest.mark.anyio
+async def test_submit_rejects_unimplemented_webhook(client):
+    res = await client.call_tool(
+        "submit_transcription",
+        {"audio_path": "meeting.wav", "webhook_url": "https://example.com/result"},
+    )
+    assert res.is_error is True
+    assert "todavía no está disponible" in res.content[0].text

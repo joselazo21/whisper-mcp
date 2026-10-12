@@ -15,6 +15,7 @@ import httpx
 CORE_URL = os.getenv("WHISPER_CORE_URL", "http://127.0.0.1:8001").rstrip("/")
 CORE_API_KEY = os.getenv("WHISPER_CORE_API_KEY", "")
 DEFAULT_MODEL = os.getenv("WHISPER_MODEL_ID", "Systran/faster-whisper-large-v3")
+SYNC_TIMEOUT_SECONDS = float(os.getenv("WHISPER_SYNC_TIMEOUT_SECONDS", "600"))
 
 _client: httpx.AsyncClient | None = None
 
@@ -65,7 +66,7 @@ def _map_error(status: int, body: str) -> CoreError:
     if status in (401, 403):
         return CoreError("api_key inválida o ausente en el core (401/403).", status)
     if status == 404:
-        return CoreError("job_id no encontrado en el core (404).", status)
+        return CoreError("recurso no encontrado en el core (404).", status)
     if status == 429:
         return CoreError("cuota excedida (429), reintenta más tarde.", status)
     if status >= 500:
@@ -82,6 +83,7 @@ async def transcribe_bytes(
     response_format: str = "json",
     prompt: str | None = None,
     temperature: float | None = 0.0,
+    timeout: float | None = None,
 ) -> dict:
     data: dict = {"model": model}
     if language:
@@ -98,6 +100,7 @@ async def transcribe_bytes(
         data=data,
         files={"file": (filename, audio, "application/octet-stream")},
         headers=_headers(),
+        timeout=httpx.Timeout(timeout or SYNC_TIMEOUT_SECONDS, connect=10.0),
     )
     _raise_for(response)
     # El mock devuelve JSON; Speaches puede devolver texto plano si
@@ -106,21 +109,3 @@ async def transcribe_bytes(
         return response.json()
     except ValueError:
         return {"text": response.text}
-
-
-async def submit_job(payload: dict) -> dict:
-    response = await get_client().post(f"{CORE_URL}/v1/jobs", json=payload, headers=_headers())
-    _raise_for(response)
-    return response.json()
-
-
-async def get_job(job_id: str) -> dict:
-    response = await get_client().get(f"{CORE_URL}/v1/jobs/{job_id}", headers=_headers(), timeout=30.0)
-    _raise_for(response)
-    return response.json()
-
-
-async def cancel_job(job_id: str) -> dict:
-    response = await get_client().delete(f"{CORE_URL}/v1/jobs/{job_id}", headers=_headers(), timeout=30.0)
-    _raise_for(response)
-    return response.json()

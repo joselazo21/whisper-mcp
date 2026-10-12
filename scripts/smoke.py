@@ -1,16 +1,18 @@
 """Smoke test completo del servidor MCP (mock).
 
-Requiere mock core (:8001) y MCP (:8000) corriendo.
+Requiere el stack de compose (PostgreSQL, RabbitMQ, worker, mock core y MCP).
   python scripts/smoke.py
 
 Cubre: list_tools, transcribe, error sin fuente, error job inexistente,
-flujo asíncrono (submit -> get -> get tras delay -> cancel) y el recurso.
+flujo real de cola (submit -> worker -> get) y el recurso.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import wave
+from pathlib import Path
 
 from mcp import Client
 
@@ -31,6 +33,14 @@ def _is_error(result: object) -> bool:
 
 
 async def main() -> None:
+    audio_dir = Path(__file__).resolve().parents[1] / "audio"
+    audio_dir.mkdir(exist_ok=True)
+    with wave.open(str(audio_dir / "smoke.wav"), "wb") as wav:
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(16000)
+        wav.writeframes(b"\x00" * 32000)
+
     async with Client(MCP_URL) as client:
         listing = await client.list_tools()
         tools = [getattr(t, "name", t) for t in getattr(listing, "tools", listing)]
@@ -49,21 +59,20 @@ async def main() -> None:
         print("                       ", _texts(r)[0])
 
         r = await client.call_tool(
-            "submit_transcription", {"audio_url": "http://example.com/a.wav", "language": "es"}
+            "submit_transcription", {"audio_path": "smoke.wav", "language": "es"}
         )
         job = json.loads(_texts(r)[0])
         jid = job["job_id"]
         print("\n[submit]                ->", job)
 
-        r = await client.call_tool("get_transcription", {"job_id": jid})
-        print("[get inmediato]         ->", _texts(r)[0])
-
-        await asyncio.sleep(1.5)
-        r = await client.call_tool("get_transcription", {"job_id": jid})
-        print("[get tras 1.5s]         ->", _texts(r)[0])
-
-        r = await client.call_tool("cancel_transcription", {"job_id": jid})
-        print("[cancel]                ->", _texts(r)[0])
+        for _ in range(30):
+            r = await client.call_tool("get_transcription", {"job_id": jid})
+            state = json.loads(_texts(r)[0])
+            if state["status"] in ("done", "failed", "cancelled"):
+                break
+            await asyncio.sleep(1)
+        print("[resultado del worker] ->", state)
+        assert state["status"] == "done", state
 
         r = await client.read_resource("whisper://info")
         print("\n[recurso whisper://info]", _texts(r)[0])

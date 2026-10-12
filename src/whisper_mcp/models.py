@@ -20,7 +20,7 @@ class Segment(BaseModel):
 
 class TranscribeResult(BaseModel):
     text: str = Field(description="Texto completo transcrito.")
-    language: str = Field(description="Idioma detectado o especificado.")
+    language: str | None = Field(default=None, description="Idioma, si el formato del core lo proporciona.")
     segments: list[Segment] = Field(default_factory=list, description="Segmentos con marcas de tiempo.")
 
 

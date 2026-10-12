@@ -70,4 +70,4 @@ async def test_read_resource(client):
 
     data = json.loads(result.contents[0].text)
     assert data["engine"].startswith("faster-whisper")
-    assert data["max_sync_seconds"] == 30
+    assert data["max_sync_seconds"] == 300

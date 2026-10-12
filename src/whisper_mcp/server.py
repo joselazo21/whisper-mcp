@@ -1,7 +1,8 @@
 """Servidor MCP de Whisper (adaptador delgado, sin GPU, sin modelo).
 
-Expone 4 tools + un recurso (`whisper://info`) y reenvía al core (mock en local,
-Speaches en producción). El motor es intercambiable vía WHISPER_CORE_URL.
+Expone 4 tools + un recurso (`whisper://info`). La transcripción síncrona va
+al core (mock en local, Speaches en producción); los trabajos largos se
+persisten en PostgreSQL y los procesa el worker vía RabbitMQ.
 
 - Parámetros PLANOS (inputSchema fiel al contrato).
 - Salida estructurada (outputSchema + structured_content) vía tipos de retorno.
@@ -17,6 +18,8 @@ from __future__ import annotations
 
 import json
 import os
+import sys
+import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from functools import wraps
@@ -30,10 +33,12 @@ from pydantic import Field
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
-from . import core_client
+from . import core_client, jobs
 from .audio import AudioValidationError, estimate_duration, resolve_audio_bytes
 from .core_client import CoreError
 from .models import CancelResult, JobResult, SubmitResult, TranscribeResult
+
+MAX_SYNC_SECONDS = 5 * 60
 
 
 @asynccontextmanager
@@ -51,13 +56,13 @@ mcp = MCPServer(
     title="Whisper (transcripción de voz)",
     description="Transcripción de audio a texto vía faster-whisper, expuesta como API MCP.",
     instructions=(
-        "Usa 'transcribe' para clips cortos (hasta 30 s) y "
+        "Usa 'transcribe' para clips de hasta 5 minutos y "
         "'submit_transcription' + 'get_transcription' para audios largos. "
         "Proporciona exactamente UNA fuente de audio."
     ),
     version="0.1.0",
     # Dependencias de runtime que `mcp dev`/`mcp install` instalan por sí solas.
-    dependencies=["httpx"],
+    dependencies=["httpx", "psycopg[binary]", "aio-pika"],
     log_level=os.getenv("MCP_LOG_LEVEL", "INFO").upper(),
     debug=os.getenv("MCP_DEBUG", "false").lower() in ("1", "true", "yes", "on"),
     lifespan=_lifespan,
@@ -75,7 +80,7 @@ def _as_tool_error(fn: Callable[..., Awaitable[Any]]) -> Callable[..., Awaitable
     async def wrapper(*args: Any, **kwargs: Any) -> Any:
         try:
             return await fn(*args, **kwargs)
-        except (AudioValidationError, CoreError) as exc:
+        except (AudioValidationError, CoreError, jobs.JobNotFound) as exc:
             raise ToolError(str(exc)) from exc
 
     return wrapper
@@ -95,8 +100,8 @@ def info() -> str:
         {
             "model": core_client.DEFAULT_MODEL,
             "languages": ["es", "en", "auto"],
-            "engine": "faster-whisper (core mock)",
-            "max_sync_seconds": 30,
+            "engine": "faster-whisper-compatible core",
+            "max_sync_seconds": MAX_SYNC_SECONDS,
             "core_url": core_client.CORE_URL,
         }
     )
@@ -108,7 +113,7 @@ def info() -> str:
 @mcp.tool(
     name="transcribe",
     description=(
-        "Transcribe un clip de audio corto (hasta 30 segundos) a texto. "
+        "Transcribe un clip de audio de hasta 5 minutos a texto. "
         "Para audio más largo usa submit_transcription. "
         "Proporciona exactamente UNA de audio_url, audio_base64 o audio_path."
     ),
@@ -136,9 +141,10 @@ async def transcribe(
 
     # Validación de duración (stub en el mock: ver audio.estimate_duration).
     duration = estimate_duration(raw)
-    if duration > 30:
+    if duration > MAX_SYNC_SECONDS:
         raise AudioValidationError(
-            f"El audio dura ~{duration:.0f}s; usa submit_transcription para audio largo."
+            f"El audio dura ~{duration:.0f}s y supera el límite de 5 minutos; "
+            "usa submit_transcription para audio largo."
         )
 
     result = await core_client.transcribe_bytes(
@@ -167,21 +173,18 @@ async def submit_transcription(
     audio_path: Annotated[str | None, Field(description="Ruta en un volumen compartido con el servidor.")] = None,
     language: Annotated[str | None, Field(description="Código ISO-639-1. Opcional.")] = None,
     webhook_url: Annotated[
-        str | None, Field(description="URL donde el core hará POST al terminar (firmado con HMAC).")
+        str | None, Field(description="Reservado para una futura entrega por webhook; no disponible aún.")
     ] = None,
 ) -> SubmitResult:
     sources = [s for s in (audio_url, audio_path) if s]
     if len(sources) != 1:
         raise AudioValidationError("Proporciona exactamente UNA de audio_url o audio_path.")
+    if webhook_url is not None:
+        raise AudioValidationError("webhook_url todavía no está disponible; consulta el resultado con get_transcription.")
+    if audio_url is not None and not audio_url.startswith(("http://", "https://")):
+        raise AudioValidationError("audio_url debe ser http/https.")
 
-    result = await core_client.submit_job(
-        {
-            "audio_url": audio_url,
-            "audio_path": audio_path,
-            "language": language,
-            "webhook_url": webhook_url,
-        }
-    )
+    result = await jobs.submit_job(audio_url=audio_url, audio_path=audio_path, language=language)
     return SubmitResult.model_validate(result)
 
 
@@ -194,7 +197,7 @@ async def submit_transcription(
 async def get_transcription(
     job_id: Annotated[str, Field(description="Identificador del trabajo devuelto por submit_transcription.")],
 ) -> JobResult:
-    result = await core_client.get_job(job_id)
+    result = await jobs.get_job(job_id)
     return JobResult.model_validate(result)
 
 
@@ -207,7 +210,7 @@ async def get_transcription(
 async def cancel_transcription(
     job_id: Annotated[str, Field(description="Identificador del trabajo a cancelar.")],
 ) -> CancelResult:
-    result = await core_client.cancel_job(job_id)
+    result = await jobs.cancel_job(job_id)
     return CancelResult.model_validate(result)
 
 
@@ -221,12 +224,14 @@ async def healthz(request: Request) -> JSONResponse:
 
 @mcp.custom_route("/readyz", methods=["GET"])
 async def readyz(request: Request) -> JSONResponse:
-    # En el mock, ready = core accesible. Comprobación ligera.
+    # El MCP necesita el core para la tool síncrona y PostgreSQL para los jobs.
     try:
-        await core_client.get_client().get(f"{core_client.CORE_URL}/health", timeout=3.0)
+        response = await core_client.get_client().get(f"{core_client.CORE_URL}/health", timeout=3.0)
+        response.raise_for_status()
+        await jobs.ping()
         return JSONResponse({"status": "ready"})
     except Exception:  # noqa: BLE001
-        return JSONResponse({"status": "not_ready", "core_url": core_client.CORE_URL}, status_code=503)
+        return JSONResponse({"status": "not_ready"}, status_code=503)
 
 
 # --------------------------------------------------------------------------- #
@@ -251,6 +256,8 @@ def _transport_security(host: str) -> TransportSecuritySettings | None:
 
 
 def main() -> None:
+    if sys.platform == "win32":
+        asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     host = os.getenv("MCP_HOST", "127.0.0.1")
     mcp.run(
         transport="streamable-http",

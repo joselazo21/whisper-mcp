@@ -14,7 +14,7 @@ def test_map_401():
 
 def test_map_404():
     e = _map_error(404, "")
-    assert "job_id" in str(e)
+    assert "recurso" in str(e)
 
 
 def test_map_429():

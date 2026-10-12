@@ -1,0 +1,72 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: whisper
+      POSTGRES_USER: whisper
+      POSTGRES_PASSWORD: whisper-local-only
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./schema.sql:/docker-entrypoint-initdb.d/001-schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U whisper -d whisper"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  rabbitmq:
+    image: rabbitmq:4-management
+    environment:
+      RABBITMQ_DEFAULT_USER: whisper
+      RABBITMQ_DEFAULT_PASS: whisper-local-only
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "-q", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  mock-core:
+    build: .
+    command: ["python", "-m", "mock_core.app"]
+
+  mcp:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://whisper:whisper-local-only@postgres:5432/whisper
+      WHISPER_CORE_URL: http://mock-core:8001
+      WHISPER_AUDIO_DIR: /audio
+      MCP_HOST: 0.0.0.0
+      MCP_ALLOWED_HOSTS: localhost:8000,127.0.0.1:8000,mcp:8000
+    volumes:
+      - ./audio:/audio:ro
+    ports:
+      - "127.0.0.1:8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mock-core:
+        condition: service_started
+
+  worker:
+    build: .
+    command: ["python", "-m", "whisper_mcp.worker"]
+    environment:
+      DATABASE_URL: postgresql://whisper:whisper-local-only@postgres:5432/whisper
+      RABBITMQ_URL: amqp://whisper:whisper-local-only@rabbitmq/
+      WHISPER_CORE_URL: http://mock-core:8001
+      WHISPER_AUDIO_DIR: /audio
+    volumes:
+      - ./audio:/audio:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+      mock-core:
+        condition: service_started
+
+volumes:
+  postgres_data:
+  rabbitmq_data:

@@ -15,6 +15,7 @@ import httpx
 
 MAX_BASE64_BYTES = 5 * 1024 * 1024  # 5 MB
 MAX_URL_BYTES = 25 * 1024 * 1024  # 25 MB al descargar
+MAX_JOB_AUDIO_BYTES = 200 * 1024 * 1024  # trabajos largos, un worker a la vez
 
 
 class AudioValidationError(Exception):
@@ -29,6 +30,8 @@ async def resolve_audio_bytes(
     audio_url: str | None,
     audio_base64: str | None,
     audio_path: str | None,
+    *,
+    max_bytes: int = MAX_URL_BYTES,
 ) -> tuple[bytes, str]:
     """Devuelve (bytes, filename). Exige exactamente una fuente."""
     sources = [s for s in (audio_url, audio_base64, audio_path) if s]
@@ -47,13 +50,20 @@ async def resolve_audio_bytes(
         return raw, "audio.bin"
 
     if audio_path is not None:
-        base = _allowed_dir()
-        full = os.path.abspath(os.path.join(base, audio_path))
-        if not full.startswith(base + os.sep) and full != base:
+        base = os.path.realpath(_allowed_dir())
+        full = os.path.realpath(os.path.join(base, audio_path))
+        try:
+            inside = os.path.commonpath((base, full)) == base
+        except ValueError:
+            inside = False
+        if not inside:
             raise AudioValidationError("audio_path fuera del directorio permitido.")
         try:
             with open(full, "rb") as f:
-                return f.read(), os.path.basename(audio_path)
+                raw = f.read(max_bytes + 1)
+            if len(raw) > max_bytes:
+                raise AudioValidationError(f"audio_path excede {max_bytes // (1024 * 1024)} MB.")
+            return raw, os.path.basename(audio_path)
         except OSError as exc:  # noqa: BLE001
             raise AudioValidationError(f"No se pudo leer audio_path: {exc}") from exc
 
@@ -61,15 +71,20 @@ async def resolve_audio_bytes(
     if not audio_url.startswith(("http://", "https://")):
         raise AudioValidationError("audio_url debe ser http/https.")
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            resp = await client.get(audio_url)
-            resp.raise_for_status()
-            raw = resp.content
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=False) as client:
+            chunks = []
+            total = 0
+            async with client.stream("GET", audio_url) as resp:
+                resp.raise_for_status()
+                async for chunk in resp.aiter_bytes():
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise AudioValidationError(f"audio_url excede {max_bytes // (1024 * 1024)} MB.")
+                    chunks.append(chunk)
+            raw = b"".join(chunks)
     except httpx.HTTPError as exc:
         raise AudioValidationError(f"No se pudo descargar audio_url: {exc}") from exc
 
-    if len(raw) > MAX_URL_BYTES:
-        raise AudioValidationError("audio_url excede 25 MB.")
     return raw, "audio.bin"
 
 
@@ -77,6 +92,6 @@ def estimate_duration(_audio: bytes) -> float:
     """STUB: devuelve una duración fija. No decodifica audio.
 
     En producción, usar ffprobe u otra librería para obtener la duración real y
-    rechazar clips > 30 s en la tool `transcribe` (no fiarse del tamaño).
+    rechazar clips > 5 minutos en la tool `transcribe` (no fiarse del tamaño).
     """
     return 10.0

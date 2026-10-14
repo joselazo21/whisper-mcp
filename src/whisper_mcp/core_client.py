@@ -12,7 +12,7 @@ import os
 
 import httpx
 
-CORE_URL = os.getenv("WHISPER_CORE_URL", "http://127.0.0.1:8001").rstrip("/")
+CORE_URL = os.getenv("WHISPER_CORE_URL", "http://127.0.0.1:8000").rstrip("/")
 CORE_API_KEY = os.getenv("WHISPER_CORE_API_KEY", "")
 DEFAULT_MODEL = os.getenv("WHISPER_MODEL_ID", "Systran/faster-whisper-large-v3")
 SYNC_TIMEOUT_SECONDS = float(os.getenv("WHISPER_SYNC_TIMEOUT_SECONDS", "600"))

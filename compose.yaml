@@ -1,3 +1,12 @@
+# Whisper MCP — stack local de desarrollo.
+#
+# El core de transcripción es Speaches (imagen oficial, CPU + INT8) en lugar
+# del mock. El servidor MCP y el worker siguen hablando con el core por
+# `WHISPER_CORE_URL`, igual que antes; solo cambia el destino.
+#
+# Para Railway, este Compose NO se ejecuta tal cual: cada servicio se despliega
+# como un servicio independiente. Consulta docs/Whisper-MCP-railway.md.
+
 services:
   postgres:
     image: postgres:17
@@ -27,15 +36,44 @@ services:
       timeout: 5s
       retries: 10
 
-  mock-core:
-    build: .
-    command: ["python", "-m", "mock_core.app"]
+  # Core real de transcripción (OpenAI-compatible, CPU-only).
+  # Sustituye al antiguo mock-core. Mismo contrato: GET /health y
+  # POST /v1/audio/transcriptions, así que mcp y worker no cambian.
+  speaches:
+    image: ghcr.io/speaches-ai/speaches:0.9.0-rc.3-cpu
+    restart: unless-stopped
+    environment:
+      # Solo CPU + cuantización INT8 (lo recomendado para CPU).
+      WHISPER__INFERENCE_DEVICE: cpu
+      WHISPER__COMPUTE_TYPE: int8
+      # Auth: exige "Authorization: Bearer <API_KEY>" en /v1/*. /health queda abierto.
+      API_KEY: ${SPEACHES_API_KEY:-whisper-local-only}
+      # Sin UI web, sin descarga por inactividad, modelo precargado al arrancar.
+      ENABLE_UI: "false"
+      LOG_LEVEL: info
+      STT_MODEL_TTL: "-1"
+      PRELOAD_MODELS: '["Systran/faster-whisper-small"]'
+    volumes:
+      # Caché de Hugging Face (modelos descargados). Persiste entre recreaciones.
+      - hf_cache:/home/ubuntu/.cache/huggingface/hub
+    ports:
+      # Solo para depurar localmente con curl. El MCP/worker lo alcanzan por
+      # la red interna en http://speaches:8000, no por este puerto.
+      - "127.0.0.1:8001:8000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 180s
 
   mcp:
     build: .
     environment:
       DATABASE_URL: postgresql://whisper:whisper-local-only@postgres:5432/whisper
-      WHISPER_CORE_URL: http://mock-core:8001
+      WHISPER_CORE_URL: http://speaches:8000
+      WHISPER_CORE_API_KEY: ${SPEACHES_API_KEY:-whisper-local-only}
+      WHISPER_MODEL_ID: Systran/faster-whisper-small
       WHISPER_AUDIO_DIR: /audio
       MCP_HOST: 0.0.0.0
       MCP_ALLOWED_HOSTS: localhost:8000,127.0.0.1:8000,mcp:8000
@@ -46,8 +84,8 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      mock-core:
-        condition: service_started
+      speaches:
+        condition: service_healthy
 
   worker:
     build: .
@@ -55,7 +93,9 @@ services:
     environment:
       DATABASE_URL: postgresql://whisper:whisper-local-only@postgres:5432/whisper
       RABBITMQ_URL: amqp://whisper:whisper-local-only@rabbitmq/
-      WHISPER_CORE_URL: http://mock-core:8001
+      WHISPER_CORE_URL: http://speaches:8000
+      WHISPER_CORE_API_KEY: ${SPEACHES_API_KEY:-whisper-local-only}
+      WHISPER_MODEL_ID: Systran/faster-whisper-small
       WHISPER_AUDIO_DIR: /audio
     volumes:
       - ./audio:/audio:ro
@@ -64,9 +104,10 @@ services:
         condition: service_healthy
       rabbitmq:
         condition: service_healthy
-      mock-core:
-        condition: service_started
+      speaches:
+        condition: service_healthy
 
 volumes:
   postgres_data:
   rabbitmq_data:
+  hf_cache:

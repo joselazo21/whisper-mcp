@@ -3,8 +3,9 @@
 Servidor MCP para transcribir audio. Los clips de hasta 5 minutos se envían
 directamente al core de transcripción. Para audios largos, el servidor guarda el
 trabajo en PostgreSQL y un worker lo procesa con ayuda de RabbitMQ. Docker
-Compose usa `mock_core` para las pruebas locales; el despliegue puede usar
-Speaches.
+Compose usa **Speaches** (imagen oficial, CPU + INT8, modelo
+`Systran/faster-whisper-small`) como core de transcripción. `mock_core` queda
+solo como utilidad para pruebas.
 
 ## Probarlo en local
 
@@ -26,10 +27,11 @@ uv pip install -e ".[dev]"
 ```
 
 La prueba crea `audio/smoke.wav`, transcribe un clip, envía un trabajo a la cola
-y consulta su resultado. La transcripción es ficticia porque Compose usa
-`mock_core`. También puedes comprobar la disponibilidad del servidor en
-`http://127.0.0.1:8000/healthz` y la conexión con el core y PostgreSQL en
-`http://127.0.0.1:8000/readyz`.
+y consulta su resultado. La transcripción es real: Compose usa Speaches (CPU).
+La primera vez descarga el modelo `Systran/faster-whisper-small` (~460 MB) al
+arrancar, por lo que el primer `up` tarda unos minutos. También puedes comprobar
+la disponibilidad del servidor en `http://127.0.0.1:8000/healthz` y la conexión
+con el core y PostgreSQL en `http://127.0.0.1:8000/readyz`.
 
 ## Herramientas MCP
 
@@ -79,7 +81,7 @@ bucle de eventos Selector que necesita Psycopg.
 |---|---|
 | `DATABASE_URL` | Conexión PostgreSQL del MCP y del worker. |
 | `RABBITMQ_URL` | Conexión RabbitMQ del worker. |
-| `WHISPER_CORE_URL` | URL base del mock o de Speaches. |
+| `WHISPER_CORE_URL` | URL base del core de transcripción (Speaches). |
 | `WHISPER_CORE_API_KEY` | Clave enviada al core como token Bearer, si se configura. |
 | `WHISPER_MODEL_ID` | Modelo enviado al core; por defecto, `Systran/faster-whisper-large-v3`. |
 | `WHISPER_AUDIO_DIR` | Directorio permitido para `audio_path`. |
@@ -89,11 +91,11 @@ bucle de eventos Selector que necesita Psycopg.
 | `MCP_HOST`, `MCP_PORT` | Dirección y puerto del servidor; por defecto, `127.0.0.1:8000`. |
 | `MCP_ALLOWED_HOSTS`, `MCP_ALLOWED_ORIGINS` | Hosts y orígenes permitidos para la protección contra DNS rebinding cuando se configuran. |
 
-Para usar Speaches, cambia `WHISPER_CORE_URL` en el MCP y en el worker y, si
-corresponde, configura `WHISPER_CORE_API_KEY` en ambos. Deben poder alcanzar el
-endpoint `/v1/audio/transcriptions` del core. RabbitMQ solo transporta el
-`job_id`; el audio permanece en un volumen compartido o en una URL accesible
-para el worker.
+El core por defecto es **Speaches** (CPU). El MCP y el worker lo alcanzan en
+`WHISPER_CORE_URL` y, si está configurada, envían `WHISPER_CORE_API_KEY` como
+token Bearer. Deben poder alcanzar el endpoint `/v1/audio/transcriptions` del
+core. RabbitMQ solo transporta el `job_id`; el audio permanece en un volumen
+compartido o en una URL accesible para el worker.
 
 En Compose, `schema.sql` se aplica automáticamente solo al crear un volumen de
 PostgreSQL. Si ya existe una base de datos, aplica el esquema como migración

@@ -258,10 +258,12 @@ def main() -> None:
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     host = os.getenv("MCP_HOST", "127.0.0.1")
+    # En Railway el puerto lo fija la variable PORT; localmente se usa MCP_PORT.
+    port = int(os.getenv("MCP_PORT") or os.getenv("PORT") or "8000")
     mcp.run(
         transport="streamable-http",
         host=host,
-        port=int(os.getenv("MCP_PORT", "8000")),
+        port=port,
         streamable_http_path="/mcp",
         transport_security=_transport_security(host),
     )

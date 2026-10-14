@@ -337,7 +337,7 @@ Mapeo core→MCP:
 - **Procesos:** servidor MCP y worker Python separados; el worker también publica el outbox.
 - **Imagen:** misma base que el core, **sin GPU** (el MCP server no necesita GPU).
 - **Health:** `/readyz` comprueba conectividad al core; `/healthz` solo liveness.
-- **Compose local:** `mcp`, `worker`, `postgres`, `rabbitmq` y `mock-core`; el ejemplo solo publica MCP en localhost.
+- **Compose local:** `mcp`, `worker`, `postgres`, `rabbitmq` y `speaches` (core); el ejemplo solo publica MCP en localhost. El `mock_core` sigue disponible como utilidad de pruebas.
 - **K8s:** `Deployment` (stateless, N réplicas) + `Service` + `Ingress` (Nginx/TLS) apuntando al core por DNS interno. Mismo código, sin cambios.
 
 ## 12. Comunidad: por qué construir el nuestro
